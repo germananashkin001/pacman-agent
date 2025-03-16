@@ -41,7 +41,10 @@ class OffensiveAgent(CaptureAgent):
         self.food_carrying = game_state.get_agent_state(self.index).num_carrying
 
         border_positions = self.get_border_positions(game_state)
-        min_border_distance = min([self.get_maze_distance(my_pos, b) for b in border_positions])
+        try:
+            min_border_distance = min([self.get_maze_distance(my_pos, b) for b in border_positions])
+        except:
+            pass
 
         best_action = None
         min_enemy_distance = float('inf')
@@ -70,8 +73,27 @@ class OffensiveAgent(CaptureAgent):
             except ValueError:
                 closest_enemy_dist = 999
 
+            # Get the closest food distance
+            food_list = self.get_food(game_state).as_list()
+            if food_list:
+                min_food_distance = min([self.get_maze_distance(my_pos, food) for food in food_list])
+            else:
+                min_food_distance = float('inf')  # No food left
+
+            # Get the closest enemy distance
+            enemies = [game_state.get_agent_state(i) for i in self.get_opponents(game_state)]
+            ghosts = [e for e in enemies if not e.is_pacman and e.get_position() is not None]
+            if ghosts:
+                min_ghost_distance = min([self.get_maze_distance(my_pos, g.get_position()) for g in ghosts])
+            else:
+                min_ghost_distance = float('inf')  # No enemies left
+
             # *1. If carrying food and near border, prioritize returning*
             if self.food_carrying >= 3 and min_border_distance <= 10 or closest_enemy_dist < 3:
+                return self.return_to_border(game_state, actions, border_positions)
+
+            # *NEW CONDITION: If carrying at least one food and food is further than border, return home*
+            if self.food_carrying >= 1 and min_food_distance > min_border_distance:
                 return self.return_to_border(game_state, actions, border_positions)
 
             # *2. Chase intruders in own field*
@@ -123,21 +145,35 @@ class OffensiveAgent(CaptureAgent):
         return best_action if best_action else random.choice(actions)
 
     def smart_escape(self, game_state, actions, ghosts):
-        """Improved escape strategy in enemy territory."""
-        enemy_positions = [g.get_position() for g in ghosts]
         safe_actions = []
-
+        border_positions = self.get_border_positions(game_state)
+        
         for action in actions:
             successor = self.get_successor(game_state, action)
             new_pos = successor.get_agent_state(self.index).get_position()
-            min_dist = min([self.get_maze_distance(new_pos, g) for g in enemy_positions])
-            if min_dist >= 3:
-                safe_actions.append((action, min_dist))
+            
+            # Calculate distance from all ghosts
+            enemy_distances = [self.get_maze_distance(new_pos, g.get_position()) for g in ghosts]
+            min_enemy_distance = min(enemy_distances) if enemy_distances else float('inf')
+            
+            # Calculate the distance to the closest border point
+            border_distance = min([self.get_maze_distance(new_pos, b) for b in border_positions])
+            
+            # Avoid dead-ends by ensuring at least 2 possible moves
+            if len(game_state.get_legal_actions(self.index)) > 2:
+                safe_actions.append((action, min_enemy_distance, border_distance))
 
         if safe_actions:
-            return max(safe_actions, key=lambda x: x[1])[0]  # Pick the safest option
+            # If an enemy is within 5 tiles, prioritize maximizing distance from them while moving toward the border
+            if any(dist <= 5 for _, dist, _ in safe_actions):
+                return max(safe_actions, key=lambda x: (x[1], -x[2]))[0]  # Maximize enemy distance, minimize border distance
+            
+            # Otherwise, just go toward the border safely
+            return min(safe_actions, key=lambda x: x[2])[0]  # Pick action minimizing border distance
+        
+        return random.choice(actions)  # If no safe actions exist, pick randomly
 
-        return random.choice(actions)  # If no safe actions, pick randomly
+
 
     def safe_seek_food(self, game_state, actions, ghosts):
         """Move towards the nearest food while avoiding enemies."""
@@ -191,9 +227,11 @@ class OffensiveAgent(CaptureAgent):
         return position[0] <= (self.start[0] // 2)
 
     def get_border_positions(self, game_state):
+        """Finds the border positions where the agent can return to its own side."""
         width = game_state.data.layout.width
         height = game_state.data.layout.height
-        border_x = (self.start[0] // 2) if self.red else (self.start[0] // 2) + 1
+        is_red = game_state.is_on_red_team(self.index)  # Properly check if agent is on the red team
+        border_x = (width // 2) - 1 if is_red else (width // 2)  # Properly divide field into red & blue zones
         return [(border_x, y) for y in range(height) if not game_state.has_wall(border_x, y)]
 
 
@@ -216,9 +254,9 @@ class DefensiveAgent(CaptureAgent):
         enemies = [game_state.get_agent_state(i) for i in self.get_opponents(game_state)]
         invaders = [a for a in enemies if a.is_pacman and a.get_position() is not None]
         remaining_food = len(self.get_food(game_state).as_list())
-        
+        my_pos = game_state.get_agent_state(self.index).get_position()
         # If food is scarce, prioritize defense
-        if remaining_food < 8 or len(invaders) > 0:
+        if remaining_food < 10 or self.get_score(game_state) > 0 or len(invaders) > 0:
             values = [self.evaluate(game_state, a) for a in actions]
             max_value = max(values)
             best_actions = [a for a, v in zip(actions, values) if v == max_value]
@@ -234,7 +272,10 @@ class DefensiveAgent(CaptureAgent):
             # Track food carried
             self.food_carrying = game_state.get_agent_state(self.index).num_carrying
             border_positions = self.get_border_positions(game_state)
-            min_border_distance = min([self.get_maze_distance(my_pos, b) for b in border_positions])
+            try:
+                min_border_distance = min([self.get_maze_distance(my_pos, b) for b in border_positions])
+            except:
+                min_border_distance = 999
 
             # If carrying a lot of food and near the border, prioritize returning
             if self.food_carrying >= 3 and min_border_distance <= 10:
@@ -416,3 +457,4 @@ class DefensiveAgent(CaptureAgent):
     def is_in_enemy_territory(self, position):
         """Checks if the given position is in the enemy's side of the field."""
         return position[0] > (self.start[0] // 2)
+
